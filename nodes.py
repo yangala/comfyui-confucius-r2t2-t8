@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 from .bridge import ROOT, WorkerError, manager
+from .r2t2_core.audio import comfy_audio_to_16k
 
 LANGUAGES = ["Auto", "Chinese", "English", "Cantonese", "Japanese", "Korean", "German", "French", "Russian", "Portuguese", "Spanish", "Italian"]
 
@@ -63,22 +64,13 @@ class R2T2Transcribe:
 
     def transcribe(self, model, audio, mode, language, context, hotwords, channel,
                    auto_gain=True, stream_chunk_ms=160):
-        import numpy as np
-
-        if not isinstance(audio, dict) or "waveform" not in audio or "sample_rate" not in audio:
-            raise ValueError("Expected ComfyUI AUDIO with waveform and sample_rate")
-        waveform = audio["waveform"]
-        if hasattr(waveform, "detach"):
-            waveform = waveform.detach().cpu().float().numpy()
-        waveform = np.asarray(waveform)
-        if waveform.ndim != 3 or waveform.shape[0] != 1 or waveform.shape[1] < 1 or waveform.shape[1] > 8:
-            raise ValueError(f"Expected AUDIO [1, channels, samples], got {waveform.shape}")
-        if waveform.shape[2] == 0 or not np.isfinite(waveform).all():
-            raise ValueError("Audio must be nonempty and finite")
-        pcm = np.ascontiguousarray(waveform[0].T, dtype="<f4")
-        options = {"sample_rate": int(audio["sample_rate"]), "channels": waveform.shape[1],
+        # Downmix and resample before the request. Shipping the source format
+        # instead costs 5.5x the bytes on 44.1 kHz stereo and reaches the
+        # worker's 512 MB body limit at about 25 minutes of audio.
+        pcm = comfy_audio_to_16k(audio, channel)
+        options = {"sample_rate": 16000, "channels": 1,
                    "mode": mode, "language": language, "context": context,
-                   "hotwords": hotwords, "channel": channel, "auto_gain": auto_gain,
+                   "hotwords": hotwords, "auto_gain": auto_gain,
                    "stream_chunk_ms": stream_chunk_ms}
         result = manager.transcribe(pcm.tobytes(), options, model["config"])
         return (result["text"], result.get("language", ""), json.dumps(result, ensure_ascii=False))
